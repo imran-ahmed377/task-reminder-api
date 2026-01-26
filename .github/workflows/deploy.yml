@@ -29,6 +29,22 @@ jobs:
         pip install -r requirements.txt
         pip install pytest pytest-asyncio httpx
     
+    - name: Start FastAPI server
+      run: |
+        uvicorn main:app --host 0.0.0.0 --port 8001 > /tmp/server.log 2>&1 &
+        echo $! > /tmp/server.pid
+    
+    - name: Wait for API server to start
+      run: |
+        for i in {1..30}; do
+          if nc -z localhost 8001; then
+            echo "✅ API server is running!"
+            break
+          fi
+          echo "Waiting for API server... ($i/30)"
+          sleep 1
+        done
+    
     - name: Run tests
       run: |
         python -m pytest test_api.py -v
