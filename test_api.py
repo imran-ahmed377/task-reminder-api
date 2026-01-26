@@ -21,8 +21,8 @@ def print_section(title):
 
 def test_health_check():
     """Test 1: Health Check"""
-    print_section("Test 1: Health Check - GET /")
-    response = requests.get(f"{BASE_URL}/")
+    print_section("Test 1: Health Check - GET /api/health")
+    response = requests.get(f"{BASE_URL}/api/health")
     print(f"Status Code: {response.status_code}")
     print(f"Response: {json.dumps(response.json(), indent=2)}")
     assert response.status_code == 200
@@ -125,7 +125,7 @@ def test_create_task_no_auth():
     response = requests.post(f"{BASE_URL}/tasks/", json=task_data)
     print(f"Status Code: {response.status_code}")
     print(f"Response: {json.dumps(response.json(), indent=2)}")
-    assert response.status_code == 403
+    assert response.status_code == 401
     print("✓ Authentication requirement working")
 
 
