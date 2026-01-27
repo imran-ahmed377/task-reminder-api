@@ -360,7 +360,10 @@
     </div>
 
     <script>
-        const API_URL = 'http://localhost:8001';
+        // Detect API URL dynamically
+        const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+            ? 'http://localhost:8001'
+            : `https://${window.location.host}`;
         const WS_URL = 'ws://localhost:8001';
         let token = localStorage.getItem('token');
         let ws = null;
