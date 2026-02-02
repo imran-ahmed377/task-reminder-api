@@ -364,7 +364,9 @@
         const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
             ? 'http://localhost:8001'
             : `https://${window.location.host}`;
-        const WS_URL = 'ws://localhost:8001';
+        const WS_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+            ? 'ws://localhost:8001'
+            : `wss://${window.location.host}`;
         let token = localStorage.getItem('token');
         let ws = null;
         let editingTaskId = null;  // Track which task is being edited
