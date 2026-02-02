@@ -8,7 +8,8 @@ on:
 
 env:
   PYTHON_VERSION: '3.11'
-  AZURE_WEBAPP_NAME: 'task-reminder-api'  # Change this to your Azure app name
+  AZURE_WEBAPP_NAME: 'task-reminder-api'
+  AZURE_WEBAPP_URL: 'task-reminder-api.azurewebsites.net'
 
 jobs:
   test:
@@ -33,28 +34,30 @@ jobs:
       run: |
         uvicorn main:app --host 0.0.0.0 --port 8001 > /tmp/server.log 2>&1 &
         echo $! > /tmp/server.pid
+        sleep 3
     
     - name: Wait for API server to start
       run: |
         for i in {1..30}; do
-          if nc -z localhost 8001; then
+          if nc -z localhost 8001 2>/dev/null; then
             echo "✅ API server is running!"
-            break
+            exit 0
           fi
           echo "Waiting for API server... ($i/30)"
           sleep 1
         done
+        echo "❌ Server failed to start"
+        cat /tmp/server.log
+        exit 1
     
     - name: Run tests
       run: |
-        python -m pytest test_api.py -v
+        python -m pytest test_api.py -v --tb=short
     
     - name: Lint with flake8
       run: |
         pip install flake8
-        # Stop the build if there are Python syntax errors or undefined names
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # Exit-zero treats all errors as warnings
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
       continue-on-error: true
 
@@ -67,38 +70,111 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     
-    - name: Zip application
+    - name: Create deployment package
       run: |
-        zip -r deploy.zip . -x ".git/*" ".github/*" "venv/*" "__pycache__/*" "*.pyc" ".pytest_cache/*"
+        zip -r app-deploy.zip . \
+          -x ".git/*" \
+            ".github/*" \
+            "venv/*" \
+            "__pycache__/*" \
+            "*.pyc" \
+            ".pytest_cache/*" \
+            "*.egg-info/*" \
+            ".env" \
+            "tasks.db"
+        ls -lh app-deploy.zip
     
-    - name: Deploy to Azure
+    - name: Extract Azure credentials
+      id: azure_creds
       run: |
-        # Decode credentials from the publish profile secret
-        PUBLISH_PROFILE='${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}'
+        PROFILE='${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}'
         
-        # Extract username and password
-        USERNAME=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+' | head -1)
-        PASSWORD=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+' | head -1)
+        # Extract ZipDeploy section only
+        ZIPDEPLOY_SECTION=$(echo "$PROFILE" | sed -n '/<publishProfile[^>]*publishMethod="ZipDeploy"/,/<\/publishProfile>/p')
         
-        # Extract the Zip Deploy URL from publish profile
-        DEPLOY_URL=$(echo "$PUBLISH_PROFILE" | grep 'ZipDeploy' | grep -oP 'publishUrl="\K[^"]+')
+        # Extract credentials
+        USERNAME=$(echo "$ZIPDEPLOY_SECTION" | grep -oP 'userName="\K[^"]+' | head -1)
+        PASSWORD=$(echo "$ZIPDEPLOY_SECTION" | grep -oP 'userPWD="\K[^"]+' | head -1)
+        PUBLISH_URL=$(echo "$ZIPDEPLOY_SECTION" | grep -oP 'publishUrl="\K[^":]+')
         
-        echo "Deploying to: $DEPLOY_URL"
+        # Validate extraction
+        if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ] || [ -z "$PUBLISH_URL" ]; then
+          echo "❌ Failed to extract credentials from publish profile"
+          echo "Profile length: ${#PROFILE}"
+          exit 1
+        fi
         
-        # Upload zip file
-        curl -X POST \
+        echo "✅ Credentials extracted successfully"
+        echo "::add-mask::$USERNAME"
+        echo "::add-mask::$PASSWORD"
+        echo "username=$USERNAME" >> $GITHUB_OUTPUT
+        echo "password=$PASSWORD" >> $GITHUB_OUTPUT
+        echo "url=$PUBLISH_URL" >> $GITHUB_OUTPUT
+    
+    - name: Deploy via Zip Deploy
+      run: |
+        DEPLOY_URL="${{ steps.azure_creds.outputs.url }}"
+        USERNAME="${{ steps.azure_creds.outputs.username }}"
+        PASSWORD="${{ steps.azure_creds.outputs.password }}"
+        
+        echo "🚀 Starting deployment to Azure..."
+        echo "Target: https://${DEPLOY_URL}/api/zipdeploy"
+        
+        HTTP_CODE=$(curl -X POST \
           -u "$USERNAME:$PASSWORD" \
-          --data-binary @deploy.zip \
-          "https://${DEPLOY_URL}/api/zipdeploy" \
-          -H "Content-Type: application/octet-stream" || {
-            echo "Deployment upload failed"
-            exit 1
-          }
+          --data-binary @app-deploy.zip \
+          -H "Content-Type: application/octet-stream" \
+          -w "%{http_code}" \
+          -o /tmp/deploy_response.txt \
+          "https://${DEPLOY_URL}/api/zipdeploy")
         
-        echo "Deployment completed successfully"
+        echo "Response code: $HTTP_CODE"
+        cat /tmp/deploy_response.txt
+        
+        if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "202" ]; then
+          echo "❌ Deployment failed with HTTP $HTTP_CODE"
+          exit 1
+        fi
+        
+        echo "✅ Deployment package uploaded successfully"
     
-    - name: Verify Deployment
+    - name: Wait for app to restart
       run: |
-        sleep 30
-        curl -s https://task-reminder-api.azurewebsites.net/api/health | head -20
+        echo "⏳ Waiting for Azure to restart the application..."
+        sleep 45
+    
+    - name: Verify deployment
+      run: |
+        echo "🔍 Verifying deployment..."
+        for i in {1..5}; do
+          RESPONSE=$(curl -s -w "\n%{http_code}" "https://${{ env.AZURE_WEBAPP_URL }}/api/health")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Health check passed!"
+            echo "Response: $BODY"
+            exit 0
+          fi
+          
+          echo "Attempt $i/5: HTTP $HTTP_CODE - retrying..."
+          sleep 10
+        done
+        
+        echo "❌ Health check failed after 5 attempts"
+        exit 1
+    
+    - name: Deployment success notification
+      if: success()
+      run: |
+        echo "✅ Deployment successful!"
+        echo "Application URL: https://${{ env.AZURE_WEBAPP_URL }}"
+        echo "API Health: https://${{ env.AZURE_WEBAPP_URL }}/api/health"
+    
+    - name: Deployment failure notification
+      if: failure()
+      run: |
+        echo "❌ Deployment failed!"
+        echo "Check GitHub Actions logs for details"
+        exit 1
 
